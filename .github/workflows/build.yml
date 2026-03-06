@@ -1,11 +1,11 @@
 name: Build and Push Multi-Arch PHP Image
 
-on:
+于:
   push:
-    branches:
+    分支:
       - main  # 当推送到 main 分支时触发
-    tags:
-      - 'v*'   # 或者打标签时触发
+    标签:
+      - 'v*'   # 或者打标签时触发1
 
 jobs:
   build:
