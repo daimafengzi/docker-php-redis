@@ -12,46 +12,53 @@ RUN apk add --no-cache \
     autoconf \
     automake
 
-# 1. 安装 Redis (PECL 方式)
+# 1. 安装 Redis
 RUN pecl install redis \
     && docker-php-ext-enable redis
 
-# 2. 安装 PDO MySQL (官方脚本方式)
+# 2. 安装 PDO MySQL
 RUN docker-php-ext-install pdo_mysql
+
+# 3. 【关键策略】创建一个临时目录，把所有需要的 .so 文件集中到这里
+# 这样不管它们原本散落在哪里，我们都能确切知道去哪里拿
+RUN mkdir -p /tmp/php-extensions \
+    && cp $(php -r "echo ini_get('extension_dir');")/redis.so /tmp/php-extensions/ \
+    && cp $(php -r "echo ini_get('extension_dir');")/pdo_mysql.so /tmp/php-extensions/ \
+    && echo "Files copied to /tmp/php-extensions:" && ls -l /tmp/php-extensions/
+
+# 4. 同样备份 ini 文件
+RUN mkdir -p /tmp/php-ini \
+    && cp /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /tmp/php-ini/ \
+    && cp /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /tmp/php-ini/
 
 # ==========================
 # 阶段 2: Production (生产环境)
 # ==========================
 FROM php:8.2-fpm-alpine
 
-# 1. 安装运行时依赖 (必须，否则连不上库)
+# 1. 安装运行时依赖
 RUN apk add --no-cache mariadb-connector-c
 
-# 2. 动态获取当前 PHP 的扩展目录路径 (最稳妥的做法)
-# 这样即使 PHP 升级，路径也会自动适配
+# 2. 获取扩展目录
+RUN PHP_EXT_DIR=$(php -r "echo ini_get('extension_dir');") && \
+    mkdir -p "$PHP_EXT_DIR"
+
+# 3. 【绝对可靠】从 Builder 的临时目录直接复制文件
+# 不再依赖通配符匹配子目录，直接从 /tmp/php-extensions 拿
+COPY --from=builder /tmp/php-extensions/redis.so "$PHP_EXT_DIR/redis.so"
+COPY --from=builder /tmp/php-extensions/pdo_mysql.so "$PHP_EXT_DIR/pdo_mysql.so"
+
+# 4. 复制配置文件
+COPY --from=builder /tmp/php-ini/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
+COPY --from=builder /tmp/php-ini/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
+
+# 5. 最终验证 (如果这里还失败，说明上面复制真的没成功，会直接阻断)
 RUN set -ex; \
-    PHP_EXT_DIR=$(php -r "echo ini_get('extension_dir');"); \
-    mkdir -p "$PHP_EXT_DIR"; \
-    echo "Extension dir detected: $PHP_EXT_DIR"
-
-# 3. 【关键修复】从 Builder 复制扩展文件 (.so)
-# 使用通配符 */ 来匹配具体的子目录，防止路径写死
-COPY --from=builder /usr/local/lib/php/extensions/*/redis.so "$PHP_EXT_DIR/redis.so"
-COPY --from=builder /usr/local/lib/php/extensions/*/pdo_mysql.so "$PHP_EXT_DIR/pdo_mysql.so"
-
-# 4. 复制配置文件 (.ini)
-# 虽然 docker-php-ext-enable 通常会自动处理，但显式复制更保险
-COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
-COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
-
-# 5. 【终极验证】在镜像构建阶段就检查！
-# 如果这一步失败，GitHub Actions 会变红，你根本不会去拉取坏镜像
-RUN set -ex; \
-    php -m | grep -q redis || (echo "❌ FATAL: Redis extension missing!" && exit 1); \
-    php -m | grep -q pdo_mysql || (echo "❌ FATAL: PDO MySQL extension missing!" && exit 1); \
-    php -r "if (!defined('PDO::MYSQL_ATTR_INIT_COMMAND')) { echo '❌ FATAL: Constant missing!'; exit(1); }"; \
-    echo "✅ All checks passed. Image is safe to deploy."
+    echo "Checking extensions..."; \
+    php -m | grep -q redis || (echo "❌ FATAL: Redis missing" && exit 1); \
+    php -m | grep -q pdo_mysql || (echo "❌ FATAL: PDO MySQL missing" && exit 1); \
+    php -r "if (!defined('PDO::MYSQL_ATTR_INIT_COMMAND')) { echo '❌ FATAL: Constant missing'; exit(1); }"; \
+    echo "✅ SUCCESS: Image is valid."
 
 WORKDIR /app
-
 CMD ["php-fpm"]
