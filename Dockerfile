@@ -16,14 +16,10 @@ RUN apk add --no-cache \
 RUN pecl install redis \
     && docker-php-ext-enable redis
 
-# 2. 安装 PDO MySQL
+# 2. 安装 PDO MySQL（会生成 .so）
 RUN docker-php-ext-install pdo_mysql
 
-# 3. 【新增】安装 MySQLi（和 pdo_mysql 一样，使用 docker-php-ext-install）
-RUN docker-php-ext-install mysqli
-
-# 4. 验证 Builder 阶段文件是否存在 (调试用)
-RUN ls -l /usr/local/lib/php/extensions/no-debug-non-zts-20220829/ | grep -E "(redis|pdo_mysql|mysqli)"
+# 注意：不再安装 mysqli，因为它不生成 .so，且无需在 builder 处理
 
 
 # ==========================
@@ -34,23 +30,27 @@ FROM php:8.2-fpm-alpine
 # 1. 安装运行时依赖
 RUN apk add --no-cache mariadb-connector-c
 
-# 2. 【硬编码路径】Alpine PHP 8.2 固定路径
+# 2. 【关键】启用 mysqli（核心扩展，无需 .so，直接启用）
+#    docker-php-ext-install 对 core extensions 实际是创建一个空 .ini 启用它
+RUN docker-php-ext-install mysqli
+
+# 3. 硬编码路径（只为 redis 和 pdo_mysql 用）
 ENV PHP_EXT_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
 
-# 3. 创建目录 (以防万一)
+# 4. 创建目录
 RUN mkdir -p ${PHP_EXT_DIR}
 
-# 4. 【核心修复】直接复制 .so 文件（新增 mysqli.so）
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so ${PHP_EXT_DIR}/redis.so
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/pdo_mysql.so ${PHP_EXT_DIR}/pdo_mysql.so
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/mysqli.so ${PHP_EXT_DIR}/mysqli.so   # ← 新增这一行！
+# 5. 只复制需要 .so 的扩展（redis, pdo_mysql）
+COPY --from=builder ${PHP_EXT_DIR}/redis.so ${PHP_EXT_DIR}/redis.so
+COPY --from=builder ${PHP_EXT_DIR}/pdo_mysql.so ${PHP_EXT_DIR}/pdo_mysql.so
+# ← 不再复制 mysqli.so（它不存在！）
 
-# 5. 复制配置文件（mysqli 无独立 .ini，无需复制）
+# 6. 复制 .ini 文件（只针对 redis 和 pdo_mysql）
 COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
 COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
-# 注意：mysqli 是核心扩展，启用后自动生成配置或无需额外 ini
+# mysqli 会由 docker-php-ext-install 自动生成 ini 或内建启用
 
-# 6. 启用 OPcache（无 JIT）
+# 7. 启用 OPcache
 RUN docker-php-ext-enable opcache \
     && { \
         echo 'opcache.enable=1'; \
@@ -62,12 +62,12 @@ RUN docker-php-ext-enable opcache \
         echo 'opcache.fast_shutdown=1'; \
     } > /usr/local/etc/php/conf.d/10-opcache.ini
 
-# 7. 简单验证（新增 mysqli 检查）
+# 8. 验证所有扩展
 RUN php -m | grep -q redis || (echo "ERROR: Redis not loaded" && exit 1)
 RUN php -m | grep -q pdo_mysql || (echo "ERROR: PDO MySQL not loaded" && exit 1)
-RUN php -m | grep -q mysqli || (echo "ERROR: MySQLi not loaded" && exit 1)   # ← 新增
+RUN php -m | grep -q mysqli || (echo "ERROR: MySQLi not loaded" && exit 1)
 RUN php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('ERROR: Constant missing');"
-RUN php -r "function_exists('mysqli_connect') or die('ERROR: mysqli_connect missing');"   # ← 新增
+RUN php -r "function_exists('mysqli_connect') or die('ERROR: mysqli_connect missing');"
 
 WORKDIR /app
 CMD ["php-fpm"]
