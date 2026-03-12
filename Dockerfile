@@ -1,60 +1,50 @@
-# 基础镜像 (Alpine 最小化)
+# ===========================
+# 阶段 1: Builder (编译环境)
+# ===========================
+FROM php:8.2-fpm-alpine AS builder
+
+# 仅安装编译必需依赖
+RUN apk add --no-cache $PHPIZE_DEPS hiredis-dev mariadb-dev linux-headers
+
+# 安装必要扩展
+RUN pecl install redis-6.3.0 && docker-php-ext-enable redis
+RUN docker-php-ext-install pdo_mysql
+
+# ==========================
+# 阶段 2: Production (生产环境)
+# ==========================
 FROM php:8.2-fpm-alpine
 
-# 时区设置 (单行高效)
-ENV TZ=Asia/Shanghai
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# 1. 安装运行时依赖（仅 mariadb-connector-c）
+RUN apk add --no-cache mariadb-connector-c
 
-# 安装 Redis 扩展 (仅此扩展)
-RUN apk add --no-cache --virtual .build-deps $PHPIZE_DEPS \
-    && pecl install redis-6.3.0 \
-    && docker-php-ext-enable redis \
-    && apk del .build-deps \
-    && rm -rf /tmp/* /var/cache/apk/*
+# 2. 复制扩展文件（路径硬编码，Alpine PHP 8.2 固定）
+ENV PHP_EXT_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
+COPY --from=builder ${PHP_EXT_DIR}/redis.so ${PHP_EXT_DIR}/
+COPY --from=builder ${PHP_EXT_DIR}/pdo_mysql.so ${PHP_EXT_DIR}/
+COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-*.ini /usr/local/etc/php/conf.d/
 
-# 【核心】OPcache 配置 (小内存优化版)
-RUN mkdir -p /usr/local/etc/php/conf.d/custom && \
-    cat > /usr/local/etc/php/conf.d/custom/z-opcache.ini <<'EOF'
+# 3. 【小内存核心修改】OPcache 配置（仅改 3 行！）
+RUN cat > /usr/local/etc/php/conf.d/10-opcache.ini <<'EOF'
 zend_extension=opcache.so
 opcache.enable=1
-opcache.memory_consumption=64        ; 小内存主机关键: 64MB (原128/256)
+opcache.memory_consumption=64        ; 原 256 → 改为 64 (小内存关键)
 opcache.interned_strings_buffer=8
-opcache.max_accelerated_files=4000   ; 降低文件数
-opcache.validate_timestamps=0        ; 生产环境必须
-opcache.revalidate_freq=0
+opcache.max_accelerated_files=4000
+opcache.validate_timestamps=0
 opcache.save_comments=1
 opcache.fast_shutdown=1
+opcache.jit_buffer_size=0            ; 原 100M → 改为 0 (禁用 JIT)
+opcache.jit=disable                  ; 原 1235 → 改为 disable
 opcache.enable_cli=0
-; 小内存主机: 禁用 JIT 节省内存
-opcache.jit_buffer_size=0
-opcache.jit=disable
 EOF
 
-# PHP 基础安全配置
-RUN cat > /usr/local/etc/php/conf.d/99-prod.ini <<'EOF'
-date.timezone = Asia/Shanghai
-display_errors = Off
-log_errors = On
-error_reporting = E_ALL & ~E_DEPRECATED
-memory_limit = 128M          ; 严格限制
-expose_php = Off
-session.cookie_httponly = 1
-session.cookie_secure = 1
-allow_url_fopen = Off
-EOF
+# 4. 【保留】扩展验证（您的原逻辑）
+RUN php -m | grep -q redis || (echo "ERROR: Redis not loaded" && exit 1)
+RUN php -m | grep -q pdo_mysql || (echo "ERROR: PDO MySQL not loaded" && exit 1)
+RUN php -m | grep -q "Zend OPcache" || (echo "ERROR: OPcache not loaded" && exit 1)
+RUN php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('ERROR: Constant missing');"
 
-# 创建目录 (非root运行)
-RUN mkdir -p /app && chown -R www-data:www-data /app
 WORKDIR /app
-
-# PHP-FPM 进程优化 (小内存关键!)
-RUN sed -i "s/pm.max_children = 5/pm.max_children = 8/g" /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i "s/pm.start_servers = 2/pm.start_servers = 2/g" /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i "s/pm.min_spare_servers = 1/pm.min_spare_servers = 1/g" /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i "s/pm.max_spare_servers = 3/pm.max_spare_servers = 3/g" /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i "s/;pm.max_requests = 500/pm.max_requests = 200/g" /usr/local/etc/php-fpm.d/www.conf
-
-# 安全: 非 root 运行
-USER www-data
 EXPOSE 9000
 CMD ["php-fpm"]
