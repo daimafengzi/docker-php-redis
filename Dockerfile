@@ -32,26 +32,24 @@ RUN apk add --no-cache mariadb-connector-c
 
 # 2. 【硬编码路径】Alpine PHP 8.2 固定路径
 ENV PHP_EXT_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
-
-# 3. 创建目录 (以防万一)
 RUN mkdir -p ${PHP_EXT_DIR}
 
-# 4. 【核心修复】直接复制 .so 文件
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so ${PHP_EXT_DIR}/redis.so
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/pdo_mysql.so ${PHP_EXT_DIR}/pdo_mysql.so
+# 3. 复制扩展 .so 文件
+COPY --from=builder ${PHP_EXT_DIR}/redis.so ${PHP_EXT_DIR}/
+COPY --from=builder ${PHP_EXT_DIR}/pdo_mysql.so ${PHP_EXT_DIR}/
 
-# 5. 复制配置文件
+# 4. 复制配置文件
 COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
 COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
 
-# >>>>>>>>>>> 新增：启用 OPcache <<<<<<<<<<<
-RUN docker-php-ext-enable opcache
+# >>>>>>>>>>> 关键新增：禁用不需要的扩展 <<<<<<<<<<<
+RUN docker-php-ext-disable sodium pdo_sqlite sqlite3
 
-# 6. 简单验证 (不再使用复杂的 set -ex 多行脚本，减少解析错误)
-RUN php -m | grep -q redis || (echo "ERROR: Redis not loaded" && exit 1)
-RUN php -m | grep -q pdo_mysql || (echo "ERROR: PDO MySQL not loaded" && exit 1)
-RUN php -m | grep -q "Zend OPcache" || (echo "ERROR: OPcache not loaded" && exit 1)
-RUN php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('ERROR: Constant missing');"
+# 5. 验证
+RUN php -m | grep -q redis
+RUN php -m | grep -q pdo_mysql
+RUN php -m | grep -q "Zend OPcache"
+RUN php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('ERROR');"
 
 WORKDIR /app
 CMD ["php-fpm"]
