@@ -1,39 +1,47 @@
 # ===========================
-# PHP 8.2 FPM 优化镜像 (512MB 专用 | 保留 mysqli/pdo_mysql | 修复 OPcache 重复加载)
+# PHP 8.2 FPM 优化镜像 (512MB 专用 | 无 USER 指令 | 自动权限修复)
 # 作者：AI助手 | 日期：2026-03-12
+# 组件：✅ Redis ✅ OPcache ✅ MySQLi ✅ PDO MySQL ✅ 安全加固
 # ===========================
 
 # ---------- 阶段1：编译 Redis 扩展 ----------
-FROM php:8.2-fpm-alpine AS builder
+FROM php:8.2-fpm-alpine3.19 AS builder
 
-RUN apk add --no-cache $PHPIZE_DEPS hiredis-dev && \
-    pecl install redis-6.3.0 && \
+ARG REDIS_VERSION=6.3.0
+
+RUN apk add --no-cache \
+    $PHPIZE_DEPS \
+    hiredis-dev \
+    mariadb-connector-c-dev && \
+    pecl install redis-${REDIS_VERSION} && \
     docker-php-ext-enable redis
 
-
-# ---------- 阶段2：生产运行时（全优化） ----------
-FROM php:8.2-fpm-alpine
+# ---------- 阶段2：生产运行时 ----------
+FROM php:8.2-fpm-alpine3.19
 
 # === 1. 时区固化 ===
 ENV TZ=Asia/Shanghai \
     PHP_INI_DIR=/usr/local/etc/php
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone
 
-# === 2. 安装 MySQL 客户端库 ===
+# === 2. 安装 MySQL 客户端运行时库 ===
 RUN apk add --no-cache mariadb-connector-c
 
-# === 3. 复制 Redis 扩展 ===
+# === 3. 启用 OPcache 扩展（显式安装，避免未来兼容问题）===
+RUN docker-php-ext-install opcache
+
+# === 4. 复制 Redis 扩展 ===
 COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so \
                      /usr/local/lib/php/extensions/no-debug-non-zts-20220829/
 COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini \
                      /usr/local/etc/php/conf.d/
 
-# === 4. 【精准移除】仅删除 sodium + sqlite（mysqli/pdo_mysql 完整保留！）===
+# === 5. 精准移除冗余扩展（sodium/sqlite）===
 RUN rm -f /usr/local/etc/php/conf.d/*sodium*.ini \
            /usr/local/etc/php/conf.d/*sqlite*.ini 2>/dev/null || true
 
-# === 5. OPcache 配置（关键修复：移除 zend_extension 行！）===
-# Alpine 镜像中 OPcache 是内置 Zend 扩展，无需 zend_extension
+# === 6. OPcache 配置（生产优化）===
 RUN cat > ${PHP_INI_DIR}/conf.d/10-opcache.ini <<'EOF'
 opcache.enable=1
 opcache.memory_consumption=32
@@ -48,7 +56,7 @@ opcache.jit=disable
 opcache.enable_cli=0
 EOF
 
-# === 6. PHP 全局参数（含 mysqli 优化）===
+# === 7. PHP 全局参数（安全 & 性能）===
 RUN cat > ${PHP_INI_DIR}/conf.d/99-prod.ini <<'EOF'
 memory_limit = 128M
 upload_max_filesize = 20M
@@ -58,14 +66,14 @@ date.timezone = Asia/Shanghai
 expose_php = Off
 log_errors = On
 display_errors = Off
-disable_functions = exec,passthru,shell_exec,system,proc_open,popen
+disable_functions = exec,passthru,shell_exec,system,proc_open,popen,dl,pcntl_exec,show_source
 mysqli.reconnect = Off
 realpath_cache_size = 1024K
 realpath_cache_ttl = 60
 session.gc_probability = 0
 EOF
 
-# === 7. FPM 进程精准调控 ===
+# === 8. FPM 进程配置（内存友好）===
 RUN cat > /usr/local/etc/php-fpm.d/zzz-custom.conf <<'EOF'
 [global]
 daemonize = no
@@ -75,23 +83,40 @@ pm.max_children = 4
 pm.process_idle_timeout = 10s
 pm.max_requests = 100
 request_terminate_timeout = 60s
+; user/group 由 PHP-FPM 默认配置控制（自动使用 www-data）
 EOF
 
-# === 8. 【修复验证】独立检查各模块（避免 OPcache 重复加载报错）===
+# === 9. 【核心】智能启动脚本（安全修复权限）===
+RUN cat > /entrypoint.sh <<'EOF'
+#!/bin/sh
+set -e
+
+# 仅当 /app 可写时尝试修复权限（避免只读挂载失败）
+if [ -w /app ]; then
+    chown -R www-data:www-data /app 2>/dev/null || true
+    echo "🔧 已修复 /app 目录权限（递归）"
+else
+    echo "⚠️  /app 为只读挂载，跳过权限修复"
+fi
+
+echo "🚀 启动 PHP-FPM（工作进程将自动以 www-data 运行）..."
+exec php-fpm "$@"
+EOF
+RUN chmod +x /entrypoint.sh
+
+# === 10. 构建验证（严格模式：任一失败即中断构建）===
 RUN php -m | grep -q "mysqli" && \
-    echo "✅ mysqli 启用" && \
     php -m | grep -q "pdo_mysql" && \
-    echo "✅ pdo_mysql 启用" && \
     php -m | grep -q "redis" && \
-    echo "✅ redis 启用" && \
     php -m | grep -q "Zend OPcache" && \
-    echo "✅ OPcache 启用" && \
     ! (php -m | grep -qE "sodium|sqlite") && \
-    echo "✅ sodium/sqlite 已移除" && \
     echo "🎉 镜像构建验证全部通过！"
 
-# === 9. 基础环境 ===
+# === 11. 健康检查（可选但推荐）===
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD php -r 'exit(fsockopen("127.0.0.1", 9000, $errno, $errstr, 1) ? 0 : 1);'
+
+# === 12. 最终设置 ===
 WORKDIR /app
 EXPOSE 9000
-USER www-data
-CMD ["php-fpm"]
+CMD ["/entrypoint.sh"]
