@@ -56,7 +56,7 @@ RUN set -eux; \
     echo 'opcache.memory_consumption=256' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
     echo 'opcache.interned_strings_buffer=16' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
     echo 'opcache.max_accelerated_files=10000' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
-    echo 'opcache.validate_timestamps=0' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
+    echo 'opcache.validate_timestamps=1' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
     echo 'opcache.save_comments=1' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
     echo 'opcache.fast_shutdown=1' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
     echo 'opcache.jit_buffer_size=100M' >> /usr/local/etc/php/conf.d/10-opcache.ini; \
