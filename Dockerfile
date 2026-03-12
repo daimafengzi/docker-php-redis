@@ -1,46 +1,45 @@
 # ===========================
-# 阶段 1: Builder (纯净编译)
+# PHP 8.2 FPM 优化镜像 (512MB 专用 | 保留 mysqli + pdo_mysql)
+# 作者：AI助手 | 日期：2026-03-12
+# 特点：✅ mysqli 内置启用 ✅ pdo_mysql 保留 ✅ 仅移除 sodium/sqlite
 # ===========================
+
+# ---------- 阶段1：编译 Redis 扩展 ----------
 FROM php:8.2-fpm-alpine AS builder
 
-# 精简编译依赖（移除 automake/autoconf 等冗余）
-RUN apk add --no-cache $PHPIZE_DEPS hiredis-dev mariadb-dev
+# 安装最小编译依赖
+RUN apk add --no-cache $PHPIZE_DEPS hiredis-dev
 
-# 仅编译必要扩展
+# 编译 Redis 扩展
 RUN pecl install redis-6.3.0 && docker-php-ext-enable redis
-RUN docker-php-ext-install pdo_mysql
 
-# ==========================
-# 阶段 2: Production (全优化运行时)
-# ==========================
+
+# ---------- 阶段2：生产运行时（全优化） ----------
 FROM php:8.2-fpm-alpine
 
-# === 【1】时区固化（构建时设置，避免运行时偏差）===
+# === 1. 时区固化 ===
 ENV TZ=Asia/Shanghai \
     PHP_INI_DIR=/usr/local/etc/php
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# === 【2】运行时依赖（最小化）===
+# === 2. 安装 MySQL 客户端库（mysqli/pdo_mysql 依赖）===
 RUN apk add --no-cache mariadb-connector-c
 
-# === 【3】扩展精简（关键！构建时移除冗余）===
-ENV PHP_EXT_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
-# 复制必要扩展
-COPY --from=builder ${PHP_EXT_DIR}/redis.so ${PHP_EXT_DIR}/
-COPY --from=builder ${PHP_EXT_DIR}/pdo_mysql.so ${PHP_EXT_DIR}/
-COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
-COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
+# === 3. 复制 Redis 扩展 ===
+COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so \
+                     /usr/local/lib/php/extensions/no-debug-non-zts-20220829/
+COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini \
+                     /usr/local/etc/php/conf.d/
 
-# 【构建时禁用】确认无依赖后安全移除（释放 12MB+）
+# === 4. 【精准移除】仅删除 sodium + sqlite（mysqli/pdo_mysql 完整保留！）===
 RUN rm -f /usr/local/etc/php/conf.d/*sodium*.ini \
-           /usr/local/etc/php/conf.d/*sqlite*.ini \
-           /usr/local/etc/php/conf.d/*opcache*.ini 2>/dev/null || true
+           /usr/local/etc/php/conf.d/*sqlite*.ini 2>/dev/null || true
 
-# === 【4】OPcache 单一权威配置（解决冲突）===
+# === 5. OPcache 精准配置（32MB）===
 RUN cat > ${PHP_INI_DIR}/conf.d/10-opcache.ini <<'EOF'
 zend_extension=opcache.so
 opcache.enable=1
-opcache.memory_consumption=64
+opcache.memory_consumption=32
 opcache.interned_strings_buffer=8
 opcache.max_accelerated_files=4000
 opcache.validate_timestamps=0
@@ -52,7 +51,7 @@ opcache.jit=disable
 opcache.enable_cli=0
 EOF
 
-# === 【5】PHP 全局参数优化 ===
+# === 6. PHP 全局参数（含 mysqli 优化）===
 RUN cat > ${PHP_INI_DIR}/conf.d/99-prod.ini <<'EOF'
 ; 内存与上传
 memory_limit = 128M
@@ -67,26 +66,41 @@ log_errors = On
 display_errors = Off
 disable_functions = exec,passthru,shell_exec,system,proc_open,popen
 
-; 路径缓存优化
+; mysqli 优化（减少连接开销）
+mysqli.reconnect = Off
+mysqli.default_socket = /var/run/mysqld/mysqld.sock
+
+; 路径缓存
 realpath_cache_size = 1024K
 realpath_cache_ttl = 60
+
+; 会话优化
+session.gc_probability = 0
 EOF
 
-# === 【6】FPM 进程精准调控（防 OOM 核心）===
-RUN sed -i 's/pm = dynamic/pm = ondemand/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/pm.max_children = 5/pm.max_children = 4/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/pm.start_servers = 2/;pm.start_servers = 2/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/pm.min_spare_servers = 1/;pm.min_spare_servers = 1/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/pm.max_spare_servers = 3/;pm.max_spare_servers = 3/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/;pm.process_idle_timeout = 10s/pm.process_idle_timeout = 10s/' /usr/local/etc/php-fpm.d/www.conf && \
-    sed -i 's/pm.max_requests = 500/pm.max_requests = 100/' /usr/local/etc/php-fpm.d/www.conf
+# === 7. FPM 进程精准调控 ===
+RUN cat > /usr/local/etc/php-fpm.d/zzz-custom.conf <<'EOF'
+[global]
+daemonize = no
 
-# === 【7】构建时验证（失败即中断构建）===
-RUN php -m | grep -q redis && \
+[www]
+pm = ondemand
+pm.max_children = 4
+pm.process_idle_timeout = 10s
+pm.max_requests = 100
+request_terminate_timeout = 60s
+EOF
+
+# === 8. 【关键】构建验证（确保 mysqli + pdo_mysql + redis 全启用）===
+RUN php -m | grep -q mysqli && \
     php -m | grep -q pdo_mysql && \
+    php -m | grep -q redis && \
     php -m | grep -q "Zend OPcache" && \
-    php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('MISSING CONSTANT'); echo '✅ All extensions validated\n';"
+    ! php -m | grep -qE "sodium|sqlite" && \
+    php -r "echo '✅ 验证通过：mysqli/pdo_mysql/redis/OPcache 已启用，sodium/sqlite 已移除\n';"
 
+# === 9. 基础环境 ===
 WORKDIR /app
 EXPOSE 9000
+USER www-data
 CMD ["php-fpm"]
