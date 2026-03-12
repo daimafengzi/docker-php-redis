@@ -1,103 +1,57 @@
-# ===========================
-# PHP 8.2 FPM 优化镜像 (512MB 专用 | 无 USER | 自动权限修复)
-# 组件：✅ Redis ✅ OPcache ✅ MySQLi ✅ PDO MySQL
-# 作者：AI助手 | 日期：2026-03-12
-# ===========================
+# ==========================
+# 阶段 1: Builder (编译环境)
+# ==========================
+FROM php:8.2-fpm-alpine AS builder
 
-# ---------- 阶段1：编译 Redis 扩展 ----------
-FROM php:8.2-fpm-alpine3.19 AS builder
+# 安装编译依赖
+RUN apk add --no-cache \
+    $PHPIZE_DEPS \
+    linux-headers \
+    hiredis-dev \
+    mariadb-dev \
+    autoconf \
+    automake
 
-ARG REDIS_VERSION=6.3.0
+# 1. 安装 Redis
+RUN pecl install redis \
+    && docker-php-ext-enable redis
 
-RUN apk add --no-cache $PHPIZE_DEPS hiredis-dev && \
-    pecl install redis-${REDIS_VERSION} && \
-    docker-php-ext-enable redis
+# 2. 安装 PDO MySQL
+RUN docker-php-ext-install pdo_mysql
 
-# ---------- 阶段2：生产运行时 ----------
-FROM php:8.2-fpm-alpine3.19
+# 3. 验证 Builder 阶段文件是否存在 (调试用)
+RUN ls -l /usr/local/lib/php/extensions/no-debug-non-zts-20220829/ | grep -E "(redis|pdo_mysql)"
 
-# === 1. 时区 ===
-ENV TZ=Asia/Shanghai PHP_INI_DIR=/usr/local/etc/php
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# ==========================
+# 阶段 2: Production (生产环境)
+# ==========================
+FROM php:8.2-fpm-alpine
 
-# === 2. 安装 MySQL 客户端库 + 启用核心扩展 ===
-RUN apk add --no-cache mariadb-connector-c && \
-    docker-php-ext-install mysqli pdo pdo_mysql opcache
+# 1. 安装运行时依赖
+RUN apk add --no-cache mariadb-connector-c
 
-# === 3. 复制 Redis 扩展 ===
-COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so \
-                     /usr/local/lib/php/extensions/no-debug-non-zts-20220829/
-COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini \
-                     /usr/local/etc/php/conf.d/
+# 2. 【硬编码路径】Alpine PHP 8.2 固定路径
+ENV PHP_EXT_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
 
-# === 4. 【关键】彻底禁用不需要的扩展 ===
-RUN docker-php-ext-disable sodium sqlite3 pdo_sqlite 2>/dev/null || true
+# 3. 创建目录 (以防万一)
+RUN mkdir -p ${PHP_EXT_DIR}
 
-# === 5. OPcache 配置 ===
-RUN cat > ${PHP_INI_DIR}/conf.d/10-opcache.ini <<'EOF'
-opcache.enable=1
-opcache.memory_consumption=32
-opcache.interned_strings_buffer=8
-opcache.max_accelerated_files=4000
-opcache.validate_timestamps=0
-opcache.revalidate_freq=0
-opcache.save_comments=1
-opcache.fast_shutdown=1
-opcache.jit_buffer_size=0
-opcache.jit=disable
-opcache.enable_cli=0
-EOF
+# 4. 【核心修复】直接复制 .so 文件
+COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/redis.so ${PHP_EXT_DIR}/redis.so
+COPY --from=builder /usr/local/lib/php/extensions/no-debug-non-zts-20220829/pdo_mysql.so ${PHP_EXT_DIR}/pdo_mysql.so
 
-# === 6. PHP 全局配置 ===
-RUN cat > ${PHP_INI_DIR}/conf.d/99-prod.ini <<'EOF'
-memory_limit = 128M
-upload_max_filesize = 20M
-post_max_size = 24M
-max_execution_time = 60
-date.timezone = Asia/Shanghai
-expose_php = Off
-log_errors = On
-display_errors = Off
-disable_functions = exec,passthru,shell_exec,system,proc_open,popen,dl,pcntl_exec,show_source
-mysqli.reconnect = Off
-realpath_cache_size = 1024K
-realpath_cache_ttl = 60
-session.gc_probability = 0
-EOF
+# 5. 复制配置文件
+COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-redis.ini /usr/local/etc/php/conf.d/
+COPY --from=builder /usr/local/etc/php/conf.d/docker-php-ext-pdo_mysql.ini /usr/local/etc/php/conf.d/
 
-# === 7. FPM 配置 ===
-RUN cat > /usr/local/etc/php-fpm.d/zzz-custom.conf <<'EOF'
-[global]
-daemonize = no
-[www]
-pm = ondemand
-pm.max_children = 4
-pm.process_idle_timeout = 10s
-pm.max_requests = 100
-request_terminate_timeout = 60s
-EOF
+# >>>>>>>>>>> 新增：启用 OPcache <<<<<<<<<<<
+RUN docker-php-ext-enable opcache
 
-# === 8. 启动脚本（权限修复）===
-RUN cat > /entrypoint.sh <<'EOF'
-#!/bin/sh
-set -e
-if [ -w /app ]; then
-    chown -R www-data:www-data /app 2>/dev/null || true
-fi
-exec php-fpm
-EOF
-RUN chmod +x /entrypoint.sh
+# 6. 简单验证 (不再使用复杂的 set -ex 多行脚本，减少解析错误)
+RUN php -m | grep -q redis || (echo "ERROR: Redis not loaded" && exit 1)
+RUN php -m | grep -q pdo_mysql || (echo "ERROR: PDO MySQL not loaded" && exit 1)
+RUN php -m | grep -q "Zend OPcache" || (echo "ERROR: OPcache not loaded" && exit 1)
+RUN php -r "defined('PDO::MYSQL_ATTR_INIT_COMMAND') or die('ERROR: Constant missing');"
 
-# === 9. 【可靠】构建验证（精确匹配模块名）===
-RUN php -m | grep -E "^(mysqli|pdo_mysql|redis|Zend OPcache)$" | wc -l | grep -q "4" && \
-    ! php -m | grep -qE "^(sodium|sqlite3|pdo_sqlite)$" && \
-    echo "🎉 镜像构建验证全部通过！"
-
-# === 10. 健康检查 ===
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD php -r 'exit(fsockopen("127.0.0.1", 9000, $errno, $errstr, 1) ? 0 : 1);'
-
-# === 11. 最终设置 ===
 WORKDIR /app
-EXPOSE 9000
-CMD ["/entrypoint.sh"]
+CMD ["php-fpm"]
