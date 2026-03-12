@@ -4,15 +4,15 @@
 # ==========================
 FROM php:8.2-fpm-alpine
 
-# 1. 安装基础工具库
-RUN apk add --no-cache tzdata
-
-# 2. 安装官方推荐的便捷扩展安装脚本（稳定、自动处理依赖并清理源文件）
-ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
-
-# 3. 安装 WordPress 必需的数据库扩展(mysqli)及 Redis、OPcache 扩展
-RUN chmod +x /usr/local/bin/install-php-extensions && \
-    install-php-extensions redis mysqli opcache
+# 2. 一键式无痕安装必需扩展
+# 下载安装脚本 -> 赋予执行权限 -> 安装扩展 -> 安装完毕后彻底删除脚本（极限省空间）
+RUN apk add --no-cache tzdata && \
+    curl -sSLf \
+        -o /usr/local/bin/install-php-extensions \
+        https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions && \
+    chmod +x /usr/local/bin/install-php-extensions && \
+    install-php-extensions redis mysqli opcache && \
+    rm -f /usr/local/bin/install-php-extensions
 
 # 4. 验证扩展是否成功加载并输出日志，避免构建出异常镜像
 RUN php -m | grep -qi redis || (echo "ERROR: Redis not loaded" && exit 1) && \
