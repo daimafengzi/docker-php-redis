@@ -11,7 +11,7 @@ RUN apk add --no-cache tzdata && \
         -o /usr/local/bin/install-php-extensions \
         https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions && \
     chmod +x /usr/local/bin/install-php-extensions && \
-    install-php-extensions redis mysqli pdo_mysql opcache gd exif && \
+    install-php-extensions redis mysqli pdo_mysql opcache gd exif imagick zip intl && \
     rm -f /usr/local/bin/install-php-extensions
 
 # 4. 验证扩展是否成功加载并输出日志，避免构建出异常镜像
