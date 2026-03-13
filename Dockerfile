@@ -11,12 +11,13 @@ RUN apk add --no-cache tzdata && \
         -o /usr/local/bin/install-php-extensions \
         https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions && \
     chmod +x /usr/local/bin/install-php-extensions && \
-    install-php-extensions redis mysqli opcache && \
+    install-php-extensions redis mysqli pdo_mysql opcache && \
     rm -f /usr/local/bin/install-php-extensions
 
 # 4. 验证扩展是否成功加载并输出日志，避免构建出异常镜像
 RUN php -m | grep -qi redis || (echo "ERROR: Redis not loaded" && exit 1) && \
     php -m | grep -qi mysqli || (echo "ERROR: MySQLi not loaded" && exit 1) && \
+    php -m | grep -qi pdo_mysql || (echo "ERROR: PDO_MySQL not loaded" && exit 1) && \
     php -m | grep -qi opcache || (echo "ERROR: OPcache not loaded" && exit 1)
 
 # 5. 针对低配机器（例如 ARM 2核2G）进行极致的 PHP 和 FPM 内存优化
@@ -37,12 +38,12 @@ RUN set -ex; \
     echo "opcache.jit=disable" >> /usr/local/etc/php/conf.d/zz-opcache.ini; \
     echo "opcache.jit_buffer_size=0" >> /usr/local/etc/php/conf.d/zz-opcache.ini; \
     # FPM 进程池优化：这是省内存的核心
-    # 采用 ondemand 模式，没请求就休眠，max_children = 4 保证极端请求下不崩
+    # 采用 ondemand 模式，没请求就休眠，max_children = 15 保证 Simply Static 抓取时不假死
     echo "[www]" > /usr/local/etc/php-fpm.d/zz-low-memory.conf; \
     echo "pm = ondemand" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf; \
-    echo "pm.max_children = 4" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf; \
+    echo "pm.max_children = 15" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf; \
     echo "pm.process_idle_timeout = 10s" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf; \
-    echo "pm.max_requests = 500" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf
+    echo "pm.max_requests = 1000" >> /usr/local/etc/php-fpm.d/zz-low-memory.conf
 
 # 设置工作目录
 WORKDIR /app
